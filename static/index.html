@@ -6,28 +6,85 @@
   <title>特殊教育支持计划合规</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; }
-    main { max-width: 960px; margin: auto; }
+    main { max-width: 1040px; margin: auto; }
     button { padding: .55rem .9rem; cursor: pointer; }
     pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; }
-    .row { display: flex; gap: 1rem; align-items: center; }
+    .row { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+    table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+    th, td { border: 1px solid #d8dee4; padding: .45rem .6rem; text-align: left; font-size: .9rem; }
+    th { background: #eef1f4; }
+    .badge { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .78rem; font-weight: 600; }
+    .badge-settled { background: #daf5e6; color: #176c3b; }
+    .badge-submitted { background: #e3edff; color: #1d4fb8; }
+    .badge-recalculating { background: #fff0d6; color: #a05a00; }
+    .recalc-flag { color: #a05a00; font-weight: 700; }
+    #recalcBanner { display: none; margin: .8rem 0; padding: .6rem .9rem; background: #fff0d6; border: 1px solid #e6b450; border-radius: 8px; color: #7a4500; }
   </style>
 </head>
 <body>
 <main>
   <h1>特殊教育支持计划合规</h1>
-  <p>最小演示页。完整业务流程通过README中的JSON接口调用。</p>
-  <div class="row"><button id="load">加载记录</button><button id="stats">查看状态统计</button></div>
+  <p>支持计划 · 监护人同意 · 服务记录 · 月度复核批次。重算中的月份结论沿用上一版，请勿据此结算。</p>
+  <div id="recalcBanner"></div>
+  <div class="row">
+    <button id="load">加载记录</button>
+    <button id="batches">加载复核批次</button>
+    <button id="recalc">只看重算中</button>
+    <button id="stats">查看状态统计</button>
+  </div>
+  <div id="table"></div>
   <pre id="output">点击上方按钮读取服务状态。</pre>
 </main>
 <script>
 const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo"};
-async function show(path) {
-  const response = await fetch(path, {headers});
-  const data = await response.json();
+function showOutput(data) {
+  document.getElementById("table").innerHTML = "";
   document.getElementById("output").textContent = JSON.stringify(data, null, 2);
 }
-document.getElementById("load").onclick = () => show("/api/records?limit=20");
-document.getElementById("stats").onclick = () => show("/api/stats");
+async function getJson(path) {
+  const response = await fetch(path, {headers});
+  return response.json();
+}
+function badge(status) {
+  const label = {submitted: "未结算", settled: "已结算", recalculating: "重算中"}[status] || status;
+  return '<span class="badge badge-' + status + '">' + label + '</span>';
+}
+function renderBatches(items) {
+  document.getElementById("output").textContent = "";
+  const recalc = items.filter(i => i.status === "recalculating").length;
+  const banner = document.getElementById("recalcBanner");
+  if (recalc > 0) {
+    banner.style.display = "block";
+    banner.textContent = "⚠ 有 " + recalc + " 个月份仍在重算，页面展示的是上一版保留结论。";
+  } else {
+    banner.style.display = "none";
+    banner.textContent = "";
+  }
+  const rows = items.map(i => '<tr>'
+    + '<td>' + i.batch_no + (i.backfilled ? '（回填）' : '') + '</td>'
+    + '<td>' + i.student_id + '</td>'
+    + '<td>' + i.month + '</td>'
+    + '<td>' + badge(i.status) + (i.status === "recalculating" ? ' <span class="recalc-flag">仍在重算</span>' : '') + '</td>'
+    + '<td>' + (i.conclusion ? i.conclusion.delivered_minutes + '/' + i.conclusion.planned_minutes + ' 分钟（' + i.conclusion.compliance_rate + '%）' : '—') + '</td>'
+    + '<td>' + (i.error ? i.error : '') + '</td>'
+    + '<td>' + i.attempts + '</td>'
+    + '<td>' + (i.submitters || []).join(', ') + '</td>'
+    + '</tr>').join("");
+  document.getElementById("table").innerHTML = '<table><thead><tr>'
+    + '<th>批次号</th><th>学生</th><th>月份</th><th>状态</th><th>结论（已提供/计划）</th><th>重算错误</th><th>尝试次数</th><th>提交人</th>'
+    + '</tr></thead><tbody>' + rows + '</tbody></table>';
+}
+document.getElementById("load").onclick = () => getJson("/api/records?limit=20").then(showOutput);
+document.getElementById("batches").onclick = () => getJson("/api/batches?limit=50").then(d => renderBatches(d.items || []));
+document.getElementById("recalc").onclick = () => getJson("/api/batches?recalculating=1").then(d => renderBatches(d.items || []));
+document.getElementById("stats").onclick = async () => {
+  const data = await getJson("/api/stats");
+  const recalc = (data.batches && data.batches.recalculating) || 0;
+  showOutput(data);
+  const banner = document.getElementById("recalcBanner");
+  banner.style.display = recalc ? "block" : "none";
+  banner.textContent = recalc ? ("⚠ 统计中有 " + recalc + " 个批次仍在重算，其数字可能变化。") : "";
+};
 </script>
 </body>
 </html>

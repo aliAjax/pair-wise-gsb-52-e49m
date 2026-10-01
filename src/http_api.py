@@ -12,6 +12,12 @@ from .domain import Actor, DomainError, PermissionDenied, ValidationError
 RECORD_RE = re.compile(r"^/api/records/(\d+)$")
 ACTION_RE = re.compile(r"^/api/records/(\d+)/actions/([a-z_]+)$")
 AUDIT_RE = re.compile(r"^/api/records/(\d+)/audit$")
+SERVICES_RE = re.compile(r"^/api/records/(\d+)/services$")
+BATCHES_RE = re.compile(r"^/api/batches$")
+BATCH_RE = re.compile(r"^/api/batches/(\d+)$")
+BATCH_VERSIONS_RE = re.compile(r"^/api/batches/(\d+)/versions$")
+BATCH_ACTION_RE = re.compile(r"^/api/batches/(\d+)/actions/([a-z_]+)$")
+BACKFILL_RE = re.compile(r"^/api/batches/backfill$")
 
 
 def make_handler(service: Any, static_dir: Path):
@@ -76,6 +82,35 @@ def make_handler(service: Any, static_dir: Path):
                     records = service.list_records(self._actor(), state=query.get("state", [None])[0], limit=int(query.get("limit", ["100"])[0]))
                     self._send(200, {"items": records})
                     return
+                match = SERVICES_RE.match(parsed.path)
+                if match:
+                    query = parse_qs(parsed.query)
+                    items = service.list_services(self._actor(), int(match.group(1)), month=query.get("month", [None])[0])
+                    self._send(200, {"items": items})
+                    return
+                if parsed.path == "/api/batches":
+                    query = parse_qs(parsed.query)
+                    items = service.list_batches(
+                        self._actor(),
+                        student_id=query.get("student_id", [None])[0],
+                        status=query.get("status", [None])[0],
+                        month=query.get("month", [None])[0],
+                        recalculating_only=query.get("recalculating", ["0"])[0] in ("1", "true", "yes"),
+                        limit=int(query.get("limit", ["100"])[0]),
+                    )
+                    self._send(200, {"items": items})
+                    return
+                if parsed.path == "/api/batches/backfill":
+                    self._send(200, service.backfill_status(self._actor()))
+                    return
+                match = BATCH_VERSIONS_RE.match(parsed.path)
+                if match:
+                    self._send(200, {"items": service.batch_versions(self._actor(), int(match.group(1)))})
+                    return
+                match = BATCH_RE.match(parsed.path)
+                if match:
+                    self._send(200, service.get_batch(self._actor(), int(match.group(1))))
+                    return
                 match = RECORD_RE.match(parsed.path)
                 if match:
                     self._send(200, service.get_record(self._actor(), int(match.group(1))))
@@ -99,6 +134,33 @@ def make_handler(service: Any, static_dir: Path):
                     record = service.create(self._actor(), body.get("reference", ""), body.get("data", {}))
                     self._send(201, record)
                     return
+                if parsed.path == "/api/batches/backfill":
+                    self._send(200, service.backfill_batches(self._actor()))
+                    return
+                match = SERVICES_RE.match(parsed.path)
+                if match:
+                    entry = service.import_service(self._actor(), int(match.group(1)), body.get("data", {}))
+                    self._send(201 if not entry.get("duplicate") else 200, entry)
+                    return
+                if parsed.path == "/api/batches":
+                    record_id = body.get("record_id")
+                    if not isinstance(record_id, int):
+                        raise ValidationError("record_id必须是整数")
+                    month = body.get("month", "")
+                    batch = service.submit_batch(self._actor(), record_id, month)
+                    self._send(200 if batch.get("merged") else 201, batch)
+                    return
+                match = BATCH_ACTION_RE.match(parsed.path)
+                if match:
+                    batch_id = int(match.group(1))
+                    action = match.group(2)
+                    if action == "settle":
+                        self._send(200, service.settle_batch(self._actor(), batch_id))
+                        return
+                    if action == "recalculate":
+                        self._send(200, service.recalculate_batch(self._actor(), batch_id))
+                        return
+                    raise ValidationError("不支持的批次动作：%s" % action)
                 match = ACTION_RE.match(parsed.path)
                 if match:
                     version = body.get("expected_version")
