@@ -1,4 +1,6 @@
 """特殊教育支持计划合规领域规则与状态转换。"""
+import re
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Tuple
 
 from .domain import Actor, Conflict, ValidationError, boolean, choice, integer, number, text, text_list
@@ -8,6 +10,12 @@ INITIAL_STATE = "draft"
 CREATE_ROLES = {'case_manager'}
 ACTION_ROLES = {'consent': {'parent_rep'}, 'activate': {'case_manager'}, 'log_service': {'case_manager', 'specialist'}, 'review': {'administrator'}, 'amend': {'case_manager'}, 'close': {'administrator'}}
 TRANSITIONS = {'consent': {'draft': 'consented'}, 'activate': {'consented': 'active'}, 'log_service': {'active': 'active'}, 'review': {'active': 'under_review'}, 'amend': {'under_review': 'active'}, 'close': {'active': 'closed', 'under_review': 'closed'}}
+
+# 复核批次状态：recalculating=仍在重算（含尚未结算的月份结论），settled=已结算月份结论保留
+BATCH_RECALCULATING = "recalculating"
+BATCH_SETTLED = "settled"
+# 已结算（月份早于当前月）的批次不再随计划/同意改动失效
+BASIS_STATES = {"active", "under_review", "consented"}
 
 
 class DomainRules:
@@ -104,3 +112,95 @@ class DomainRules:
             summary = "支持计划结束"
         p.update(changes)
         return new_state, p, summary or ("已执行%s" % action)
+
+
+def current_month(now: datetime = None) -> str:
+    now = now or datetime.now(timezone.utc)
+    return now.strftime("%Y-%m")
+
+
+def month_key(value: str) -> Tuple[int, int]:
+    year, month = value.split("-")
+    return int(year), int(month)
+
+
+class RecomputeFailure(Exception):
+    """重算失败：保留上一版结论并记录错误，等待后续重试。"""
+
+
+class MonthlyRules:
+    """复核批次的依据固定、月份结算与结论重算规则。"""
+
+    BATCH_RECALCULATING = BATCH_RECALCULATING
+    BATCH_SETTLED = BATCH_SETTLED
+
+    def __init__(self, clock=None) -> None:
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def current_month(self) -> str:
+        return current_month(self.clock())
+
+    @staticmethod
+    def is_settled(month: str, now_month: str = None) -> bool:
+        now_month = now_month or current_month()
+        return month_key(month) < month_key(now_month)
+
+    @staticmethod
+    def batch_number(student_id: str, month: str) -> str:
+        safe = re.sub(r"[^0-9A-Za-z_-]", "_", student_id.strip())
+        return "RB-%s-%s" % (safe, month)
+
+    @staticmethod
+    def basis_snapshot(plan: Dict[str, Any]) -> Dict[str, Any]:
+        """提交时固定依据：之后计划/同意改动不影响已固定的批次。"""
+        payload = plan.get("payload") or {}
+        return {
+            "plan_id": plan["id"],
+            "plan_version": int(plan["version"]),
+            "student_id": payload.get("student_id", ""),
+            "plan_state": plan.get("state", ""),
+            "service_minutes": int(payload.get("service_minutes", 0)),
+            "goals_count": int(payload.get("goals_count", 0)),
+            "consent": bool(payload.get("consent")),
+            "consent_scope": payload.get("consent_scope", ""),
+        }
+
+    def validate_basis(self, plan: Dict[str, Any]) -> None:
+        if plan is None:
+            raise RecomputeFailure("缺少支持计划，无法确定计算依据")
+        if plan.get("state") not in BASIS_STATES:
+            raise RecomputeFailure("支持计划当前状态不可作为复核依据")
+        payload = plan.get("payload") or {}
+        if not payload.get("consent"):
+            raise RecomputeFailure("缺少监护人同意，无法确定计算依据")
+        if int(payload.get("service_minutes", 0)) <= 0:
+            raise RecomputeFailure("计划服务分钟数无效")
+
+    def recompute(self, basis: Dict[str, Any], service_records: Iterable[Dict[str, Any]], month: str, settle: bool = None) -> Dict[str, Any]:
+        """按固定依据与该学生该月台账汇总重算结论。台账已去重，不会重复计数。"""
+        if not basis:
+            raise RecomputeFailure("批次缺少固定依据")
+        records = list(service_records)
+        delivered = sum(int(row["minutes"]) for row in records)
+        planned = int(basis.get("service_minutes", 0))
+        if planned <= 0:
+            raise RecomputeFailure("计划服务分钟数无效")
+        if delivered > planned:
+            raise RecomputeFailure("台账服务分钟数%d超过计划%d，需先核对" % (delivered, planned))
+        compliant = delivered >= planned
+        now_month = self.current_month()
+        settled = self.is_settled(month, now_month) if settle is None else bool(settle)
+        return {
+            "month": month,
+            "delivered_minutes": delivered,
+            "service_minutes": planned,
+            "missing_minutes": max(0, planned - delivered),
+            "compliance_rate": round(delivered / planned * 100, 2),
+            "compliant": compliant,
+            "conclusion": "达标" if compliant else "未达标",
+            "record_count": len(records),
+            "settled": settled,
+        }
+
+    def status_for(self, month: str) -> str:
+        return BATCH_SETTLED if self.is_settled(month) else BATCH_RECALCULATING

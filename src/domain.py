@@ -1,4 +1,5 @@
 """领域基础类型与输入校验。"""
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
@@ -95,3 +96,13 @@ def text_list(data: Dict[str, Any], key: str, minimum: int = 0) -> List[str]:
     if len(value) < minimum:
         raise ValidationError("%s至少需要%s项" % (key, minimum))
     return [item.strip() for item in value]
+
+
+MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+def month_value(data: Dict[str, Any], key: str) -> str:
+    value = text(data, key)
+    if not MONTH_RE.match(value):
+        raise ValidationError("%s必须为YYYY-MM格式" % key)
+    return value

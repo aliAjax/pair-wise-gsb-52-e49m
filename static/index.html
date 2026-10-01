@@ -6,28 +6,84 @@
   <title>特殊教育支持计划合规</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; }
-    main { max-width: 960px; margin: auto; }
+    main { max-width: 1080px; margin: auto; }
     button { padding: .55rem .9rem; cursor: pointer; }
     pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; }
-    .row { display: flex; gap: 1rem; align-items: center; }
+    .row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin-bottom: .8rem; }
+    table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+    th, td { border: 1px solid #d9dee3; padding: .45rem .6rem; text-align: left; }
+    th { background: #eef1f4; }
+    .badge { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .78rem; }
+    .badge-recalc { background: #fff3cd; color: #8a6100; border: 1px solid #e0b400; }
+    .badge-settled { background: #e3f6e8; color: #176b34; border: 1px solid #2f9e57; }
+    .badge-error { background: #fde8e8; color: #a02020; border: 1px solid #d05050; }
+    .muted { color: #68737d; font-size: .85rem; }
   </style>
 </head>
 <body>
 <main>
   <h1>特殊教育支持计划合规</h1>
-  <p>最小演示页。完整业务流程通过README中的JSON接口调用。</p>
-  <div class="row"><button id="load">加载记录</button><button id="stats">查看状态统计</button></div>
-  <pre id="output">点击上方按钮读取服务状态。</pre>
+  <p class="muted">监护人同意或支持计划改动后：已结算月份结论保留，未结算月份失效重算；同一学生同月只有一个有效批次。</p>
+  <div class="row">
+    <button id="load">加载计划记录</button>
+    <button id="services">服务台账</button>
+    <button id="batches">复核批次</button>
+    <button id="stale">待重算</button>
+    <button id="stats">状态统计</button>
+    <button id="backfill">回填旧数据批次</button>
+  </div>
+  <div id="view"><pre>点击上方按钮读取服务状态。</pre></div>
 </main>
 <script>
 const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo"};
-async function show(path) {
-  const response = await fetch(path, {headers});
-  const data = await response.json();
-  document.getElementById("output").textContent = JSON.stringify(data, null, 2);
+function badge(batch) {
+  if (batch.state === "settled") return '<span class="badge badge-settled">已结算保留</span>';
+  if (batch.error) return '<span class="badge badge-error">重算失败（保留上一版）</span>';
+  return '<span class="badge badge-recalc">重算中</span>';
 }
-document.getElementById("load").onclick = () => show("/api/records?limit=20");
-document.getElementById("stats").onclick = () => show("/api/stats");
+async function getJson(path, options) {
+  const response = await fetch(path, Object.assign({headers}, options || {}));
+  return response.json();
+}
+function showPre(data) {
+  document.getElementById("view").innerHTML = "";
+  const pre = document.createElement("pre");
+  pre.textContent = JSON.stringify(data, null, 2);
+  document.getElementById("view").appendChild(pre);
+}
+function batchesTable(items) {
+  const wrap = document.createElement("div");
+  const hint = document.createElement("p");
+  hint.className = "muted";
+  const recalc = items.filter(b => b.state === "recalculating").length;
+  hint.textContent = "共 " + items.length + " 个批次，其中 " + recalc + " 个仍在重算（结论以重算后为准）。";
+  wrap.appendChild(hint);
+  const table = document.createElement("table");
+  table.innerHTML = "<tr><th>批次号</th><th>学生</th><th>月份</th><th>状态</th><th>结论</th><th>履约率</th><th>依据版本</th><th>提示</th></tr>";
+  for (const b of items) {
+    const tr = document.createElement("tr");
+    const r = b.result || {};
+    tr.innerHTML = "<td>" + b.batch_no + "</td><td>" + b.student_id + "</td><td>" + b.month + "</td>"
+      + "<td>" + badge(b) + (b.stale ? ' <span class="badge badge-recalc">已失效</span>' : "") + "</td>"
+      + "<td>" + (r.conclusion || "—") + "</td>"
+      + "<td>" + (r.compliance_rate != null ? r.compliance_rate + "%" : "—") + "</td>"
+      + "<td>v" + ((b.basis || {}).plan_version || "—") + "</td>"
+      + "<td>" + (b.error || "") + "</td>";
+    table.appendChild(tr);
+  }
+  wrap.appendChild(table);
+  document.getElementById("view").innerHTML = "";
+  document.getElementById("view").appendChild(wrap);
+}
+document.getElementById("load").onclick = () => getJson("/api/records?limit=20").then(showPre);
+document.getElementById("services").onclick = () => getJson("/api/service-records").then(showPre);
+document.getElementById("batches").onclick = () => getJson("/api/batches").then(d => batchesTable(d.items));
+document.getElementById("stale").onclick = () => getJson("/api/batches?stale=1").then(d => batchesTable(d.items));
+document.getElementById("stats").onclick = () => getJson("/api/stats").then(data => {
+  data.hint = "batch_recalculating/batch_recompute_errors 标出仍在重算与重算失败的结果";
+  showPre(data);
+});
+document.getElementById("backfill").onclick = () => getJson("/api/admin/backfill-batches", {method: "POST"}).then(showPre);
 </script>
 </body>
 </html>

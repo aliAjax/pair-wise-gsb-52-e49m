@@ -12,6 +12,8 @@ from .domain import Actor, DomainError, PermissionDenied, ValidationError
 RECORD_RE = re.compile(r"^/api/records/(\d+)$")
 ACTION_RE = re.compile(r"^/api/records/(\d+)/actions/([a-z_]+)$")
 AUDIT_RE = re.compile(r"^/api/records/(\d+)/audit$")
+BATCH_RE = re.compile(r"^/api/batches/(\d+)$")
+BATCH_ACTION_RE = re.compile(r"^/api/batches/(\d+)/(retry|settle)$")
 
 
 def make_handler(service: Any, static_dir: Path):
@@ -76,6 +78,28 @@ def make_handler(service: Any, static_dir: Path):
                     records = service.list_records(self._actor(), state=query.get("state", [None])[0], limit=int(query.get("limit", ["100"])[0]))
                     self._send(200, {"items": records})
                     return
+                if parsed.path == "/api/service-records":
+                    query = parse_qs(parsed.query)
+                    items = service.list_service_records(
+                        self._actor(),
+                        student_id=query.get("student_id", [None])[0],
+                        month=query.get("month", [None])[0],
+                    )
+                    self._send(200, {"items": items})
+                    return
+                if parsed.path == "/api/batches":
+                    query = parse_qs(parsed.query)
+                    items = service.list_batches(
+                        self._actor(),
+                        state=query.get("state", [None])[0],
+                        stale_only=query.get("stale", ["0"])[0] in ("1", "true", "yes"),
+                    )
+                    self._send(200, {"items": items})
+                    return
+                match = BATCH_RE.match(parsed.path)
+                if match:
+                    self._send(200, service.get_batch(self._actor(), int(match.group(1))))
+                    return
                 match = RECORD_RE.match(parsed.path)
                 if match:
                     self._send(200, service.get_record(self._actor(), int(match.group(1))))
@@ -98,6 +122,25 @@ def make_handler(service: Any, static_dir: Path):
                 if parsed.path == "/api/records":
                     record = service.create(self._actor(), body.get("reference", ""), body.get("data", {}))
                     self._send(201, record)
+                    return
+                if parsed.path == "/api/service-records":
+                    row = service.import_service_record(self._actor(), body.get("data", body))
+                    self._send(201, row)
+                    return
+                if parsed.path == "/api/batches":
+                    batch = service.submit_batch(self._actor(), body.get("data", body))
+                    self._send(201, batch)
+                    return
+                if parsed.path == "/api/admin/backfill-batches":
+                    self._send(200, service.backfill_legacy_batches(self._actor()))
+                    return
+                match = BATCH_ACTION_RE.match(parsed.path)
+                if match:
+                    batch_id = int(match.group(1))
+                    if match.group(2) == "retry":
+                        self._send(200, service.retry_batch(self._actor(), batch_id))
+                    else:
+                        self._send(200, service.settle_batch(self._actor(), batch_id))
                     return
                 match = ACTION_RE.match(parsed.path)
                 if match:
